@@ -107,9 +107,7 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
         ),
     );
 
-    info!(
-        "VibesVR SBS iniciado em modo janela: ESC sai; F11 alterna tela cheia"
-    );
+    info!("VibesVR SBS iniciado em modo janela: ESC sai; F11 alterna tela cheia");
     app.run();
 }
 
@@ -172,11 +170,7 @@ fn setup_cinema(
 
     // Moldura/parede preta atrás da tela.
     commands.spawn(PbrBundle {
-        mesh: meshes.add(Cuboid::new(
-            SCREEN_WIDTH + 0.34,
-            SCREEN_HEIGHT + 0.34,
-            0.16,
-        )),
+        mesh: meshes.add(Cuboid::new(SCREEN_WIDTH + 0.34, SCREEN_HEIGHT + 0.34, 0.16)),
         material: border_material.clone(),
         transform: Transform::from_xyz(0.0, SCREEN_Y, SCREEN_Z - 0.10),
         ..default()
@@ -246,10 +240,7 @@ fn setup_cinema(
 fn spawn_eye(parent: &mut ChildBuilder, eye: Eye, x: f32, order: isize) {
     parent.spawn((
         Camera3dBundle {
-            camera: Camera {
-                order,
-                ..default()
-            },
+            camera: Camera { order, ..default() },
             projection: PerspectiveProjection {
                 fov: FOV_DEGREES.to_radians(),
                 near: 0.05,
@@ -290,12 +281,22 @@ fn update_desktop_texture(
         return;
     };
 
-    let expected = frame.width() as usize * frame.height() as usize * 4;
+    let Some(expected) = usize::try_from(frame.width())
+        .ok()
+        .and_then(|width| {
+            usize::try_from(frame.height())
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        warn!("Dimensões do frame excedem a plataforma");
+        return;
+    };
     if frame.data().len() != expected {
         warn!(
             received = frame.data().len(),
-            expected,
-            "Frame RGBA com tamanho inválido"
+            expected, "Frame RGBA com tamanho inválido"
         );
         return;
     }
@@ -306,26 +307,38 @@ fn update_desktop_texture(
 
     let signature = sampled_rgb_signature(frame.data());
 
-    // Cria um asset com outro identificador e aponta o material para ele.
-    // Isso força a recriação do binding da textura, mesmo se o driver manteve
-    // em cache a textura de teste que usava o identificador anterior.
-    let image = new_desktop_image(frame.width(), frame.height(), frame.data().to_vec());
-    let new_texture = images.add(image);
-
     let Some(material) = materials.get_mut(&desktop.material) else {
         warn!("Material da tela 3D nao foi encontrado");
         return;
     };
 
-    material.base_color_texture = Some(new_texture.clone());
+    let same_size = images
+        .get(&desktop.current_texture)
+        .map(|image| {
+            image.texture_descriptor.size.width == frame.width()
+                && image.texture_descriptor.size.height == frame.height()
+        })
+        .unwrap_or(false);
 
-    // Mantem o asset anterior vivo por mais um quadro, para a fase de
-    // extracao/render do Bevy terminar antes de ele ser removido.
-    if let Some(stale) = desktop.stale_texture.take() {
-        images.remove(stale.id());
+    if same_size {
+        // Alterar o asset existente evita recriar textura, binding e handle a 60 FPS.
+        if let Some(image) = images.get_mut(&desktop.current_texture) {
+            image.data.copy_from_slice(frame.data());
+        }
+    } else {
+        let new_texture = images.add(new_desktop_image(
+            frame.width(),
+            frame.height(),
+            frame.data().to_vec(),
+        ));
+        material.base_color_texture = Some(new_texture.clone());
+
+        if let Some(stale) = desktop.stale_texture.take() {
+            images.remove(stale.id());
+        }
+        let previous = std::mem::replace(&mut desktop.current_texture, new_texture);
+        desktop.stale_texture = Some(previous);
     }
-    let previous = std::mem::replace(&mut desktop.current_texture, new_texture);
-    desktop.stale_texture = Some(previous);
 
     if !stats.first_frame_uploaded {
         info!(
@@ -415,8 +428,7 @@ fn new_desktop_image(width: u32, height: u32, data: Vec<u8>) -> Image {
 
     // A textura recebe novos pixels durante a execucao e tambem e amostrada
     // pelo StandardMaterial da tela do cinema.
-    image.texture_descriptor.usage =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
     image
 }
 

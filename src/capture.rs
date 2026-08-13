@@ -1,11 +1,6 @@
 use tracing::info;
 
-use crate::{
-    error::Result,
-    frame::Frame,
-    pipewire::PipeWireStream,
-    portal::PortalSession,
-};
+use crate::{error::Result, frame::Frame, pipewire::PipeWireStream, portal::PortalSession};
 
 pub struct ScreenCapture {
     // Mantém a permissão e a sessão D-Bus vivas durante toda a captura.
