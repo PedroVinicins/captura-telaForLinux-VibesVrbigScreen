@@ -47,6 +47,14 @@ Controles:
 
 - `Esc`: sair.
 - `F11`: alternar entre janela e tela cheia sem bordas.
+- `Q` / `E`: diminuir/aumentar o zoom da tela (0,50× a 2,00×).
+- `Z` / `X`: diminuir/aumentar o FOV das lentes (55° a 120°).
+- `C` / `V`: diminuir/aumentar o IPD (50 mm a 78 mm).
+- `R` / `F`: aproximar/afastar a tela virtual (3 m a 12 m).
+- `0`: restaurar zoom, FOV, IPD e distância padrão.
+
+Os ajustes são aplicados simultaneamente aos dois olhos. O IPD deve ser ajustado
+com cuidado para evitar desconforto visual; comece próximo de 64 mm.
 
 ## Desenvolvimento
 

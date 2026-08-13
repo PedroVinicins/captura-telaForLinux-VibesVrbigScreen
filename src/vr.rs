@@ -24,15 +24,42 @@ const INITIAL_TEXTURE_WIDTH: u32 = 1920;
 const INITIAL_TEXTURE_HEIGHT: u32 = 1080;
 
 // Unidades do mundo 3D em metros.
-const IPD_METERS: f32 = 0.064;
+const DEFAULT_IPD_METERS: f32 = 0.064;
 const EYE_HEIGHT: f32 = 1.20;
 const EYE_Z: f32 = 1.50;
-const FOV_DEGREES: f32 = 90.0;
+const DEFAULT_FOV_DEGREES: f32 = 90.0;
+const MIN_FOV_DEGREES: f32 = 55.0;
+const MAX_FOV_DEGREES: f32 = 120.0;
+const MIN_IPD_METERS: f32 = 0.050;
+const MAX_IPD_METERS: f32 = 0.078;
+const MIN_ZOOM: f32 = 0.50;
+const MAX_ZOOM: f32 = 2.00;
+const MIN_SCREEN_DISTANCE: f32 = 3.0;
+const MAX_SCREEN_DISTANCE: f32 = 12.0;
 
 const SCREEN_WIDTH: f32 = 8.53;
 const SCREEN_HEIGHT: f32 = 4.80;
 const SCREEN_Y: f32 = 1.20;
 const SCREEN_Z: f32 = -6.00;
+
+#[derive(Resource, Clone, Copy)]
+struct LensSettings {
+    zoom: f32,
+    fov_degrees: f32,
+    ipd_meters: f32,
+    screen_distance: f32,
+}
+
+impl Default for LensSettings {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            fov_degrees: DEFAULT_FOV_DEGREES,
+            ipd_meters: DEFAULT_IPD_METERS,
+            screen_distance: -SCREEN_Z,
+        }
+    }
+}
 
 struct CaptureState {
     // A captura deve ser destruída antes do runtime.
@@ -80,6 +107,7 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
         unfocused_mode: UpdateMode::Continuous,
     })
     .insert_resource(ClearColor(Color::BLACK))
+    .insert_resource(LensSettings::default())
     .insert_resource(AmbientLight {
         color: Color::srgb(0.12, 0.14, 0.20),
         brightness: 55.0,
@@ -111,10 +139,13 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
             update_desktop_texture,
             update_eye_viewports,
             keyboard_controls,
+            lens_controls,
         ),
     );
 
-    info!("VibesVR SBS iniciado em modo janela: ESC sai; F11 alterna tela cheia");
+    info!(
+        "VibesVR SBS iniciado: ESC sai; F11 tela cheia; Q/E zoom; Z/X FOV; C/V IPD; R/F distância; 0 restaura"
+    );
     app.run();
 }
 
@@ -239,8 +270,8 @@ fn setup_cinema(
             0.0, EYE_HEIGHT, EYE_Z,
         )))
         .with_children(|head| {
-            spawn_eye(head, Eye::Left, -IPD_METERS * 0.5, 0);
-            spawn_eye(head, Eye::Right, IPD_METERS * 0.5, 1);
+            spawn_eye(head, Eye::Left, -DEFAULT_IPD_METERS * 0.5, 0);
+            spawn_eye(head, Eye::Right, DEFAULT_IPD_METERS * 0.5, 1);
         });
 }
 
@@ -249,7 +280,7 @@ fn spawn_eye(parent: &mut ChildBuilder, eye: Eye, x: f32, order: isize) {
         Camera3dBundle {
             camera: Camera { order, ..default() },
             projection: PerspectiveProjection {
-                fov: FOV_DEGREES.to_radians(),
+                fov: DEFAULT_FOV_DEGREES.to_radians(),
                 near: 0.05,
                 far: 100.0,
                 ..default()
@@ -509,4 +540,72 @@ fn keyboard_controls(
             );
         }
     }
+}
+
+fn lens_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<LensSettings>,
+    mut eyes: Query<(&Eye, &mut Transform, &mut Projection)>,
+    mut screens: Query<&mut Transform, (With<CinemaScreen>, Without<Eye>)>,
+) {
+    let previous = *settings;
+
+    if keys.just_pressed(KeyCode::KeyQ) {
+        settings.zoom = (settings.zoom - 0.05).max(MIN_ZOOM);
+    }
+    if keys.just_pressed(KeyCode::KeyE) {
+        settings.zoom = (settings.zoom + 0.05).min(MAX_ZOOM);
+    }
+    if keys.just_pressed(KeyCode::KeyZ) {
+        settings.fov_degrees = (settings.fov_degrees - 2.0).max(MIN_FOV_DEGREES);
+    }
+    if keys.just_pressed(KeyCode::KeyX) {
+        settings.fov_degrees = (settings.fov_degrees + 2.0).min(MAX_FOV_DEGREES);
+    }
+    if keys.just_pressed(KeyCode::KeyC) {
+        settings.ipd_meters = (settings.ipd_meters - 0.001).max(MIN_IPD_METERS);
+    }
+    if keys.just_pressed(KeyCode::KeyV) {
+        settings.ipd_meters = (settings.ipd_meters + 0.001).min(MAX_IPD_METERS);
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        settings.screen_distance = (settings.screen_distance - 0.25).max(MIN_SCREEN_DISTANCE);
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        settings.screen_distance = (settings.screen_distance + 0.25).min(MAX_SCREEN_DISTANCE);
+    }
+    if keys.just_pressed(KeyCode::Digit0) || keys.just_pressed(KeyCode::Numpad0) {
+        *settings = LensSettings::default();
+    }
+
+    if settings.zoom == previous.zoom
+        && settings.fov_degrees == previous.fov_degrees
+        && settings.ipd_meters == previous.ipd_meters
+        && settings.screen_distance == previous.screen_distance
+    {
+        return;
+    }
+
+    for (eye, mut transform, mut projection) in &mut eyes {
+        transform.translation.x = match eye {
+            Eye::Left => -settings.ipd_meters * 0.5,
+            Eye::Right => settings.ipd_meters * 0.5,
+        };
+        if let Projection::Perspective(perspective) = &mut *projection {
+            perspective.fov = settings.fov_degrees.to_radians();
+        }
+    }
+
+    for mut transform in &mut screens {
+        transform.scale = Vec3::splat(settings.zoom);
+        transform.translation.z = -settings.screen_distance;
+    }
+
+    info!(
+        zoom = format_args!("{:.2}x", settings.zoom),
+        fov_degrees = settings.fov_degrees,
+        ipd_mm = settings.ipd_meters * 1_000.0,
+        screen_distance_m = settings.screen_distance,
+        "Ajustes de lente atualizados"
+    );
 }
