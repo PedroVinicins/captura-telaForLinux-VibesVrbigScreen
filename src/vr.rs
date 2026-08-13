@@ -9,6 +9,7 @@ use bevy::{
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
     },
     window::{PresentMode, PrimaryWindow, WindowMode, WindowPlugin, WindowResized},
+    winit::{UpdateMode, WinitSettings},
 };
 use tokio::runtime::Runtime;
 use tracing::{info, warn};
@@ -71,6 +72,12 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
     app.insert_non_send_resource(CaptureState {
         capture,
         _runtime: runtime,
+    })
+    // Captura de vídeo não pode ser suspensa quando a janela perde foco (por
+    // exemplo, enquanto Sunshine ou o seletor do portal está em primeiro plano).
+    .insert_resource(WinitSettings {
+        focused_mode: UpdateMode::Continuous,
+        unfocused_mode: UpdateMode::Continuous,
     })
     .insert_resource(ClearColor(Color::BLACK))
     .insert_resource(AmbientLight {
@@ -357,8 +364,12 @@ fn update_desktop_texture(
     }
 
     if stats.last_report.elapsed() >= Duration::from_secs(1) {
+        let elapsed = stats.last_report.elapsed().as_secs_f64();
+        let fps = f64::from(stats.frames) / elapsed;
         info!(
-            fps = stats.frames,
+            fps = format_args!("{fps:.1}"),
+            frames = stats.frames,
+            interval_ms = (elapsed * 1_000.0).round() as u64,
             black_frames = stats.black_frames,
             "FPS enviado ao ambiente SBS"
         );

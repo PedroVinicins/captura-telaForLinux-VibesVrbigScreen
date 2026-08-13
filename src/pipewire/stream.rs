@@ -430,7 +430,9 @@ fn convert_to_rgba(
         ));
     }
 
-    let mut rgba = Vec::with_capacity(output_len);
+    // Um único buffer e escritas indexadas evitam milhões de chamadas a
+    // `extend_from_slice` por frame, que são especialmente caras em debug.
+    let mut rgba = vec![0_u8; output_len];
 
     for output_y in 0..height {
         let source_y = if stride < 0 {
@@ -439,43 +441,101 @@ fn convert_to_rgba(
             output_y
         };
         let row_start = source_y * source_stride;
-        let row = &source[row_start..row_start + row_bytes];
+        let source_row = &source[row_start..row_start + row_bytes];
+        let output_start = output_y * row_bytes;
+        let output_row = &mut rgba[output_start..output_start + row_bytes];
 
         match format {
-            VideoFormat::RGBA => rgba.extend_from_slice(row),
+            VideoFormat::RGBA => output_row.copy_from_slice(source_row),
             VideoFormat::RGBx => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[0],
+                        source_pixel[1],
+                        source_pixel[2],
+                        255,
+                    ]);
                 }
             }
             VideoFormat::BGRA => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[2],
+                        source_pixel[1],
+                        source_pixel[0],
+                        source_pixel[3],
+                    ]);
                 }
             }
             VideoFormat::BGRx => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[2],
+                        source_pixel[1],
+                        source_pixel[0],
+                        255,
+                    ]);
                 }
             }
             VideoFormat::ARGB => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[1], pixel[2], pixel[3], pixel[0]]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[1],
+                        source_pixel[2],
+                        source_pixel[3],
+                        source_pixel[0],
+                    ]);
                 }
             }
             VideoFormat::ABGR => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[3], pixel[2], pixel[1], pixel[0]]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[3],
+                        source_pixel[2],
+                        source_pixel[1],
+                        source_pixel[0],
+                    ]);
                 }
             }
             VideoFormat::xRGB => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[1], pixel[2], pixel[3], 255]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[1],
+                        source_pixel[2],
+                        source_pixel[3],
+                        255,
+                    ]);
                 }
             }
             VideoFormat::xBGR => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[3], pixel[2], pixel[1], 255]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[3],
+                        source_pixel[2],
+                        source_pixel[1],
+                        255,
+                    ]);
                 }
             }
             unsupported => return Err(format!("formato não suportado: {unsupported:?}")),

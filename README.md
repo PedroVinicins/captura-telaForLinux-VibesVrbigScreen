@@ -37,6 +37,9 @@ instalados. Os nomes variam conforme a distribuição; no Fedora normalmente sã
 cargo run --release
 ```
 
+Use `--release` para captura real. O perfil debug torna a conversão de mais de
+dois milhões de pixels por frame muito lenta e pode aparentar travamentos.
+
 Quando o seletor do portal aparecer, escolha a janela que será exibida. A
 aplicação começa em modo janela para reduzir o risco de capturar a própria saída.
 
