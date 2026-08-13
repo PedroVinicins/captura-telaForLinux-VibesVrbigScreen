@@ -1,0 +1,243 @@
+use std::{sync::Arc, time::{Duration, Instant}};
+
+use anyhow::Result;
+use pixels::{Pixels, SurfaceTexture};
+use tokio::runtime::Runtime;
+use tracing::{error, info, warn};
+use winit::{
+    application::ApplicationHandler,
+    event::{ElementState, KeyEvent, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{Key, NamedKey},
+    window::{Window, WindowAttributes, WindowId},
+};
+
+mod capture;
+mod error;
+mod frame;
+mod pipewire;
+mod portal;
+
+use frame::Frame;
+
+const INITIAL_WIDTH: u32 = 1280;
+const INITIAL_HEIGHT: u32 = 720;
+const TARGET_FPS: u32 = 60;
+const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / TARGET_FPS as u64);
+
+struct App {
+    window: Option<Arc<Window>>,
+    pixels: Option<Pixels<'static>>,
+    capture: Option<capture::ScreenCapture>,
+    last_frame: Option<Frame>,
+    frame_count: u32,
+    last_fps_check: Instant,
+    next_redraw: Instant,
+    runtime: Runtime,
+    buffer_width: u32,
+    buffer_height: u32,
+}
+
+impl App {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            window: None,
+            pixels: None,
+            capture: None,
+            last_frame: None,
+            frame_count: 0,
+            last_fps_check: Instant::now(),
+            next_redraw: Instant::now(),
+            runtime: Runtime::new()?,
+            buffer_width: INITIAL_WIDTH,
+            buffer_height: INITIAL_HEIGHT,
+        })
+    }
+
+    fn init_capture(&mut self) {
+        if self.capture.is_some() {
+            return;
+        }
+
+        info!("Inicializando captura de tela pelo portal...");
+
+        match self.runtime.block_on(capture::ScreenCapture::new(TARGET_FPS)) {
+            Ok(capture) => {
+                info!(
+                    width = capture.width(),
+                    height = capture.height(),
+                    "Captura inicializada"
+                );
+                self.capture = Some(capture);
+            }
+            Err(error) => {
+                error!(%error, "Falha ao inicializar a captura");
+            }
+        }
+    }
+
+    fn update_frame(&mut self) {
+        let Some(capture) = self.capture.as_mut() else {
+            return;
+        };
+
+        let Some(frame) = capture.try_receive_frame() else {
+            return;
+        };
+
+        self.frame_count = self.frame_count.saturating_add(1);
+
+        if self.last_fps_check.elapsed() >= Duration::from_secs(1) {
+            info!(fps = self.frame_count, "Taxa de captura");
+            self.frame_count = 0;
+            self.last_fps_check = Instant::now();
+        }
+
+        self.last_frame = Some(frame);
+    }
+
+    fn render(&mut self) {
+        let Some(pixels) = self.pixels.as_mut() else {
+            return;
+        };
+
+        if let Some(frame) = self.last_frame.as_ref() {
+            if frame.width() != self.buffer_width || frame.height() != self.buffer_height {
+                if let Err(error) = pixels.resize_buffer(frame.width(), frame.height()) {
+                    warn!(%error, "Falha ao redimensionar o buffer de vídeo");
+                    return;
+                }
+
+                self.buffer_width = frame.width();
+                self.buffer_height = frame.height();
+            }
+
+            let destination = pixels.frame_mut();
+
+            if destination.len() == frame.data().len() {
+                destination.copy_from_slice(frame.data());
+            } else {
+                warn!(
+                    destination = destination.len(),
+                    source = frame.data().len(),
+                    "Tamanho inesperado do frame RGBA"
+                );
+                destination.fill(0);
+            }
+        } else {
+            for pixel in pixels.frame_mut().chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[0, 80, 200, 255]);
+            }
+        }
+
+        if let Err(error) = pixels.render() {
+            warn!(%error, "Erro ao renderizar");
+        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        let attributes = WindowAttributes::default()
+            .with_title("VibesVR - Screen Capture")
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                INITIAL_WIDTH as f64,
+                INITIAL_HEIGHT as f64,
+            ));
+
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                error!(%error, "Erro ao criar a janela");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        let size = window.inner_size();
+        let surface = SurfaceTexture::new(size.width, size.height, Arc::clone(&window));
+
+        let pixels = match Pixels::new(INITIAL_WIDTH, INITIAL_HEIGHT, surface) {
+            Ok(pixels) => pixels,
+            Err(error) => {
+                error!(%error, "Erro ao inicializar a GPU");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        self.window = Some(window);
+        self.pixels = Some(pixels);
+        self.init_capture();
+
+        info!("Sistema pronto. Pressione ESC para sair");
+
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
+            WindowEvent::RedrawRequested => {
+                self.update_frame();
+                self.render();
+            }
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        logical_key: Key::Named(NamedKey::Escape),
+                        ..
+                    },
+                ..
+            } => event_loop.exit(),
+            WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+                if let Some(pixels) = self.pixels.as_mut() {
+                    if let Err(error) = pixels.resize_surface(size.width, size.height) {
+                        warn!(%error, "Falha ao redimensionar a superfície");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+
+        if now >= self.next_redraw {
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+            self.next_redraw = now + FRAME_INTERVAL;
+        }
+
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_redraw));
+    }
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stdout)
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    info!("VibesVR Screen Capture - PipeWire 0.10");
+
+    let event_loop = EventLoop::new()?;
+    let mut app = App::new()?;
+    event_loop.run_app(&mut app)?;
+
+    Ok(())
+}

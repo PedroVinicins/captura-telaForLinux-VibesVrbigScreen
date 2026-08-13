@@ -1,0 +1,29 @@
+[package]
+name = "captura-tela-video"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+ashpd = "=0.12.3"
+bevy = { version = "=0.14.2", default-features = false, features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_winit",
+    "multi_threaded",
+    "tonemapping_luts",
+    "wayland",
+    "x11",
+] }
+pipewire = "=0.10.0"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
