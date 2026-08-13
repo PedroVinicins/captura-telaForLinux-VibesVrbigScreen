@@ -29,6 +29,13 @@ use crate::{
     frame::Frame,
 };
 
+const BYTES_PER_PIXEL: usize = 4;
+const MAX_FRAME_WIDTH: u32 = 8192;
+const MAX_FRAME_HEIGHT: u32 = 8192;
+// Limita a alocação de um frame a 128 MiB. O portal é uma fronteira externa:
+// metadados incorretos não devem conseguir esgotar a memória do processo.
+const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
+
 struct StreamData {
     sender: SyncSender<Frame>,
     format: VideoInfoRaw,
@@ -36,6 +43,7 @@ struct StreamData {
     started_at: Instant,
     receiver_closed: bool,
     warned_unmapped: bool,
+    warned_bad_frame: bool,
 }
 
 pub struct PipeWireStream {
@@ -59,6 +67,19 @@ impl PipeWireStream {
     ) -> Result<Self> {
         pw::init();
 
+        if fps == 0 {
+            return Err(CaptureError::Frame(
+                "FPS deve ser maior que zero".to_string(),
+            ));
+        }
+
+        if requested_width > MAX_FRAME_WIDTH || requested_height > MAX_FRAME_HEIGHT {
+            return Err(CaptureError::Frame(format!(
+                "resolução solicitada excede o limite de {MAX_FRAME_WIDTH}x{MAX_FRAME_HEIGHT}: \
+                 {requested_width}x{requested_height}"
+            )));
+        }
+
         // Alguns portais não informam o tamanho no retorno de `Start`.
         // Use uma resolução inicial sensata sem limitar a negociação posterior.
         let width = if requested_width == 0 {
@@ -71,8 +92,6 @@ impl PipeWireStream {
         } else {
             requested_height
         };
-        let fps = fps.max(1);
-
         let mainloop = MainLoopRc::new(None)?;
         let context = ContextRc::new(&mainloop, None)?;
         let core = context.connect_fd_rc(fd, None)?;
@@ -95,6 +114,7 @@ impl PipeWireStream {
             started_at: Instant::now(),
             receiver_closed: false,
             warned_unmapped: false,
+            warned_bad_frame: false,
         };
 
         let listener = stream
@@ -182,19 +202,19 @@ impl PipeWireStream {
                 let available = chunk_size.min(mapped.len() - offset);
                 let source = &mapped[offset..offset + available];
 
-                let rgba = match convert_to_rgba(
-                    state.format.format(),
-                    width,
-                    height,
-                    stride,
-                    source,
-                ) {
-                    Ok(rgba) => rgba,
-                    Err(message) => {
-                        warn!(%message, "Frame PipeWire ignorado");
-                        return;
-                    }
-                };
+                let rgba =
+                    match convert_to_rgba(state.format.format(), width, height, stride, source) {
+                        Ok(rgba) => rgba,
+                        Err(message) => {
+                            if !state.warned_bad_frame {
+                                state.warned_bad_frame = true;
+                                warn!(%message, "Frame PipeWire inválido; avisos repetidos serão omitidos");
+                            }
+                            return;
+                        }
+                    };
+
+                state.warned_bad_frame = false;
 
                 state.frame_number = state.frame_number.saturating_add(1);
                 let frame = Frame::with_metadata(
@@ -358,14 +378,30 @@ fn convert_to_rgba(
     stride: i32,
     source: &[u8],
 ) -> std::result::Result<Vec<u8>, String> {
-    let width = width as usize;
-    let height = height as usize;
+    if width == 0 || height == 0 {
+        return Err("dimensões do frame não podem ser zero".to_string());
+    }
+    if width > MAX_FRAME_WIDTH || height > MAX_FRAME_HEIGHT {
+        return Err(format!(
+            "dimensões do frame excedem o limite: {width}x{height}"
+        ));
+    }
+
+    let width =
+        usize::try_from(width).map_err(|_| "largura do frame excede a plataforma".to_string())?;
+    let height =
+        usize::try_from(height).map_err(|_| "altura do frame excede a plataforma".to_string())?;
     let row_bytes = width
-        .checked_mul(4)
+        .checked_mul(BYTES_PER_PIXEL)
         .ok_or_else(|| "largura do frame excede o limite".to_string())?;
     let output_len = row_bytes
         .checked_mul(height)
         .ok_or_else(|| "tamanho do frame excede o limite".to_string())?;
+    if output_len > MAX_FRAME_BYTES {
+        return Err(format!(
+            "frame de {output_len} bytes excede o limite de {MAX_FRAME_BYTES} bytes"
+        ));
+    }
 
     let source_stride = if stride == 0 {
         row_bytes
@@ -394,7 +430,9 @@ fn convert_to_rgba(
         ));
     }
 
-    let mut rgba = Vec::with_capacity(output_len);
+    // Um único buffer e escritas indexadas evitam milhões de chamadas a
+    // `extend_from_slice` por frame, que são especialmente caras em debug.
+    let mut rgba = vec![0_u8; output_len];
 
     for output_y in 0..height {
         let source_y = if stride < 0 {
@@ -403,43 +441,101 @@ fn convert_to_rgba(
             output_y
         };
         let row_start = source_y * source_stride;
-        let row = &source[row_start..row_start + row_bytes];
+        let source_row = &source[row_start..row_start + row_bytes];
+        let output_start = output_y * row_bytes;
+        let output_row = &mut rgba[output_start..output_start + row_bytes];
 
         match format {
-            VideoFormat::RGBA => rgba.extend_from_slice(row),
+            VideoFormat::RGBA => output_row.copy_from_slice(source_row),
             VideoFormat::RGBx => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[0],
+                        source_pixel[1],
+                        source_pixel[2],
+                        255,
+                    ]);
                 }
             }
             VideoFormat::BGRA => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[2],
+                        source_pixel[1],
+                        source_pixel[0],
+                        source_pixel[3],
+                    ]);
                 }
             }
             VideoFormat::BGRx => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[2],
+                        source_pixel[1],
+                        source_pixel[0],
+                        255,
+                    ]);
                 }
             }
             VideoFormat::ARGB => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[1], pixel[2], pixel[3], pixel[0]]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[1],
+                        source_pixel[2],
+                        source_pixel[3],
+                        source_pixel[0],
+                    ]);
                 }
             }
             VideoFormat::ABGR => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[3], pixel[2], pixel[1], pixel[0]]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[3],
+                        source_pixel[2],
+                        source_pixel[1],
+                        source_pixel[0],
+                    ]);
                 }
             }
             VideoFormat::xRGB => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[1], pixel[2], pixel[3], 255]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[1],
+                        source_pixel[2],
+                        source_pixel[3],
+                        255,
+                    ]);
                 }
             }
             VideoFormat::xBGR => {
-                for pixel in row.chunks_exact(4) {
-                    rgba.extend_from_slice(&[pixel[3], pixel[2], pixel[1], 255]);
+                for (source_pixel, output_pixel) in source_row
+                    .chunks_exact(4)
+                    .zip(output_row.chunks_exact_mut(4))
+                {
+                    output_pixel.copy_from_slice(&[
+                        source_pixel[3],
+                        source_pixel[2],
+                        source_pixel[1],
+                        255,
+                    ]);
                 }
             }
             unsupported => return Err(format!("formato não suportado: {unsupported:?}")),
@@ -447,4 +543,29 @@ fn convert_to_rgba(
     }
 
     Ok(rgba)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_bgrx_and_ignores_row_padding() {
+        let source = [3, 2, 1, 0, 6, 5, 4, 0, 99, 99, 99, 99];
+        let result = convert_to_rgba(VideoFormat::BGRx, 2, 1, 12, &source).unwrap();
+        assert_eq!(result, [1, 2, 3, 255, 4, 5, 6, 255]);
+    }
+
+    #[test]
+    fn handles_negative_stride_as_bottom_up() {
+        let source = [30, 20, 10, 255, 60, 50, 40, 255];
+        let result = convert_to_rgba(VideoFormat::RGBA, 1, 2, -4, &source).unwrap();
+        assert_eq!(result, [60, 50, 40, 255, 30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn rejects_short_and_oversized_frames() {
+        assert!(convert_to_rgba(VideoFormat::RGBA, 2, 2, 8, &[0; 15]).is_err());
+        assert!(convert_to_rgba(VideoFormat::RGBA, 8192, 8192, 0, &[]).is_err());
+    }
 }

@@ -9,6 +9,7 @@ use bevy::{
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
     },
     window::{PresentMode, PrimaryWindow, WindowMode, WindowPlugin, WindowResized},
+    winit::{UpdateMode, WinitSettings},
 };
 use tokio::runtime::Runtime;
 use tracing::{info, warn};
@@ -23,15 +24,42 @@ const INITIAL_TEXTURE_WIDTH: u32 = 1920;
 const INITIAL_TEXTURE_HEIGHT: u32 = 1080;
 
 // Unidades do mundo 3D em metros.
-const IPD_METERS: f32 = 0.064;
+const DEFAULT_IPD_METERS: f32 = 0.064;
 const EYE_HEIGHT: f32 = 1.20;
 const EYE_Z: f32 = 1.50;
-const FOV_DEGREES: f32 = 90.0;
+const DEFAULT_FOV_DEGREES: f32 = 90.0;
+const MIN_FOV_DEGREES: f32 = 55.0;
+const MAX_FOV_DEGREES: f32 = 120.0;
+const MIN_IPD_METERS: f32 = 0.050;
+const MAX_IPD_METERS: f32 = 0.078;
+const MIN_ZOOM: f32 = 0.50;
+const MAX_ZOOM: f32 = 2.00;
+const MIN_SCREEN_DISTANCE: f32 = 3.0;
+const MAX_SCREEN_DISTANCE: f32 = 12.0;
 
 const SCREEN_WIDTH: f32 = 8.53;
 const SCREEN_HEIGHT: f32 = 4.80;
 const SCREEN_Y: f32 = 1.20;
 const SCREEN_Z: f32 = -6.00;
+
+#[derive(Resource, Clone, Copy)]
+struct LensSettings {
+    zoom: f32,
+    fov_degrees: f32,
+    ipd_meters: f32,
+    screen_distance: f32,
+}
+
+impl Default for LensSettings {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            fov_degrees: DEFAULT_FOV_DEGREES,
+            ipd_meters: DEFAULT_IPD_METERS,
+            screen_distance: -SCREEN_Z,
+        }
+    }
+}
 
 struct CaptureState {
     // A captura deve ser destruída antes do runtime.
@@ -72,7 +100,14 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
         capture,
         _runtime: runtime,
     })
+    // Captura de vídeo não pode ser suspensa quando a janela perde foco (por
+    // exemplo, enquanto Sunshine ou o seletor do portal está em primeiro plano).
+    .insert_resource(WinitSettings {
+        focused_mode: UpdateMode::Continuous,
+        unfocused_mode: UpdateMode::Continuous,
+    })
     .insert_resource(ClearColor(Color::BLACK))
+    .insert_resource(LensSettings::default())
     .insert_resource(AmbientLight {
         color: Color::srgb(0.12, 0.14, 0.20),
         brightness: 55.0,
@@ -104,11 +139,12 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
             update_desktop_texture,
             update_eye_viewports,
             keyboard_controls,
+            lens_controls,
         ),
     );
 
     info!(
-        "VibesVR SBS iniciado em modo janela: ESC sai; F11 alterna tela cheia"
+        "VibesVR SBS iniciado: ESC sai; F11 tela cheia; Q/E zoom; Z/X FOV; C/V IPD; R/F distância; 0 restaura"
     );
     app.run();
 }
@@ -172,11 +208,7 @@ fn setup_cinema(
 
     // Moldura/parede preta atrás da tela.
     commands.spawn(PbrBundle {
-        mesh: meshes.add(Cuboid::new(
-            SCREEN_WIDTH + 0.34,
-            SCREEN_HEIGHT + 0.34,
-            0.16,
-        )),
+        mesh: meshes.add(Cuboid::new(SCREEN_WIDTH + 0.34, SCREEN_HEIGHT + 0.34, 0.16)),
         material: border_material.clone(),
         transform: Transform::from_xyz(0.0, SCREEN_Y, SCREEN_Z - 0.10),
         ..default()
@@ -238,20 +270,17 @@ fn setup_cinema(
             0.0, EYE_HEIGHT, EYE_Z,
         )))
         .with_children(|head| {
-            spawn_eye(head, Eye::Left, -IPD_METERS * 0.5, 0);
-            spawn_eye(head, Eye::Right, IPD_METERS * 0.5, 1);
+            spawn_eye(head, Eye::Left, -DEFAULT_IPD_METERS * 0.5, 0);
+            spawn_eye(head, Eye::Right, DEFAULT_IPD_METERS * 0.5, 1);
         });
 }
 
 fn spawn_eye(parent: &mut ChildBuilder, eye: Eye, x: f32, order: isize) {
     parent.spawn((
         Camera3dBundle {
-            camera: Camera {
-                order,
-                ..default()
-            },
+            camera: Camera { order, ..default() },
             projection: PerspectiveProjection {
-                fov: FOV_DEGREES.to_radians(),
+                fov: DEFAULT_FOV_DEGREES.to_radians(),
                 near: 0.05,
                 far: 100.0,
                 ..default()
@@ -290,12 +319,22 @@ fn update_desktop_texture(
         return;
     };
 
-    let expected = frame.width() as usize * frame.height() as usize * 4;
+    let Some(expected) = usize::try_from(frame.width())
+        .ok()
+        .and_then(|width| {
+            usize::try_from(frame.height())
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        warn!("Dimensões do frame excedem a plataforma");
+        return;
+    };
     if frame.data().len() != expected {
         warn!(
             received = frame.data().len(),
-            expected,
-            "Frame RGBA com tamanho inválido"
+            expected, "Frame RGBA com tamanho inválido"
         );
         return;
     }
@@ -306,26 +345,38 @@ fn update_desktop_texture(
 
     let signature = sampled_rgb_signature(frame.data());
 
-    // Cria um asset com outro identificador e aponta o material para ele.
-    // Isso força a recriação do binding da textura, mesmo se o driver manteve
-    // em cache a textura de teste que usava o identificador anterior.
-    let image = new_desktop_image(frame.width(), frame.height(), frame.data().to_vec());
-    let new_texture = images.add(image);
-
     let Some(material) = materials.get_mut(&desktop.material) else {
         warn!("Material da tela 3D nao foi encontrado");
         return;
     };
 
-    material.base_color_texture = Some(new_texture.clone());
+    let same_size = images
+        .get(&desktop.current_texture)
+        .map(|image| {
+            image.texture_descriptor.size.width == frame.width()
+                && image.texture_descriptor.size.height == frame.height()
+        })
+        .unwrap_or(false);
 
-    // Mantem o asset anterior vivo por mais um quadro, para a fase de
-    // extracao/render do Bevy terminar antes de ele ser removido.
-    if let Some(stale) = desktop.stale_texture.take() {
-        images.remove(stale.id());
+    if same_size {
+        // Alterar o asset existente evita recriar textura, binding e handle a 60 FPS.
+        if let Some(image) = images.get_mut(&desktop.current_texture) {
+            image.data.copy_from_slice(frame.data());
+        }
+    } else {
+        let new_texture = images.add(new_desktop_image(
+            frame.width(),
+            frame.height(),
+            frame.data().to_vec(),
+        ));
+        material.base_color_texture = Some(new_texture.clone());
+
+        if let Some(stale) = desktop.stale_texture.take() {
+            images.remove(stale.id());
+        }
+        let previous = std::mem::replace(&mut desktop.current_texture, new_texture);
+        desktop.stale_texture = Some(previous);
     }
-    let previous = std::mem::replace(&mut desktop.current_texture, new_texture);
-    desktop.stale_texture = Some(previous);
 
     if !stats.first_frame_uploaded {
         info!(
@@ -344,8 +395,12 @@ fn update_desktop_texture(
     }
 
     if stats.last_report.elapsed() >= Duration::from_secs(1) {
+        let elapsed = stats.last_report.elapsed().as_secs_f64();
+        let fps = f64::from(stats.frames) / elapsed;
         info!(
-            fps = stats.frames,
+            fps = format_args!("{fps:.1}"),
+            frames = stats.frames,
+            interval_ms = (elapsed * 1_000.0).round() as u64,
             black_frames = stats.black_frames,
             "FPS enviado ao ambiente SBS"
         );
@@ -415,8 +470,7 @@ fn new_desktop_image(width: u32, height: u32, data: Vec<u8>) -> Image {
 
     // A textura recebe novos pixels durante a execucao e tambem e amostrada
     // pelo StandardMaterial da tela do cinema.
-    image.texture_descriptor.usage =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
     image
 }
 
@@ -486,4 +540,72 @@ fn keyboard_controls(
             );
         }
     }
+}
+
+fn lens_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<LensSettings>,
+    mut eyes: Query<(&Eye, &mut Transform, &mut Projection)>,
+    mut screens: Query<&mut Transform, (With<CinemaScreen>, Without<Eye>)>,
+) {
+    let previous = *settings;
+
+    if keys.just_pressed(KeyCode::KeyQ) {
+        settings.zoom = (settings.zoom - 0.05).max(MIN_ZOOM);
+    }
+    if keys.just_pressed(KeyCode::KeyE) {
+        settings.zoom = (settings.zoom + 0.05).min(MAX_ZOOM);
+    }
+    if keys.just_pressed(KeyCode::KeyZ) {
+        settings.fov_degrees = (settings.fov_degrees - 2.0).max(MIN_FOV_DEGREES);
+    }
+    if keys.just_pressed(KeyCode::KeyX) {
+        settings.fov_degrees = (settings.fov_degrees + 2.0).min(MAX_FOV_DEGREES);
+    }
+    if keys.just_pressed(KeyCode::KeyC) {
+        settings.ipd_meters = (settings.ipd_meters - 0.001).max(MIN_IPD_METERS);
+    }
+    if keys.just_pressed(KeyCode::KeyV) {
+        settings.ipd_meters = (settings.ipd_meters + 0.001).min(MAX_IPD_METERS);
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        settings.screen_distance = (settings.screen_distance - 0.25).max(MIN_SCREEN_DISTANCE);
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        settings.screen_distance = (settings.screen_distance + 0.25).min(MAX_SCREEN_DISTANCE);
+    }
+    if keys.just_pressed(KeyCode::Digit0) || keys.just_pressed(KeyCode::Numpad0) {
+        *settings = LensSettings::default();
+    }
+
+    if settings.zoom == previous.zoom
+        && settings.fov_degrees == previous.fov_degrees
+        && settings.ipd_meters == previous.ipd_meters
+        && settings.screen_distance == previous.screen_distance
+    {
+        return;
+    }
+
+    for (eye, mut transform, mut projection) in &mut eyes {
+        transform.translation.x = match eye {
+            Eye::Left => -settings.ipd_meters * 0.5,
+            Eye::Right => settings.ipd_meters * 0.5,
+        };
+        if let Projection::Perspective(perspective) = &mut *projection {
+            perspective.fov = settings.fov_degrees.to_radians();
+        }
+    }
+
+    for mut transform in &mut screens {
+        transform.scale = Vec3::splat(settings.zoom);
+        transform.translation.z = -settings.screen_distance;
+    }
+
+    info!(
+        zoom = format_args!("{:.2}x", settings.zoom),
+        fov_degrees = settings.fov_degrees,
+        ipd_mm = settings.ipd_meters * 1_000.0,
+        screen_distance_m = settings.screen_distance,
+        "Ajustes de lente atualizados"
+    );
 }
