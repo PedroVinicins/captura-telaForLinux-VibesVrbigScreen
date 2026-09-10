@@ -609,8 +609,10 @@ fn bgra_to_rgba(
         let destination_row = &mut rgba[destination_start..destination_start + row_bytes];
 
         for (bgra, rgba) in source_row
-            .chunks_exact(4)
-            .zip(destination_row.chunks_exact_mut(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(destination_row.as_chunks_mut::<4>().0)
         {
             rgba.copy_from_slice(&[bgra[2], bgra[1], bgra[0], bgra[3]]);
         }

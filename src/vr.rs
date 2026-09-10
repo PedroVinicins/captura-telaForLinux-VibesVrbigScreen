@@ -456,7 +456,9 @@ fn update_desktop_texture(
 }
 
 fn sampled_rgb_signature(data: &[u8]) -> u64 {
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .step_by(4096)
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, pixel| {
             pixel[..3].iter().fold(hash, |value, byte| {
@@ -468,7 +470,9 @@ fn sampled_rgb_signature(data: &[u8]) -> u64 {
 fn looks_black(data: &[u8]) -> bool {
     // Amostra pixels espalhados pelo frame para nao percorrer 8 MiB a cada
     // quadro. O quarto byte e o alpha e nao entra no teste.
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .step_by(4096)
         .all(|pixel| pixel[0] <= 4 && pixel[1] <= 4 && pixel[2] <= 4)
 }
