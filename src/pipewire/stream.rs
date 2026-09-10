@@ -431,10 +431,7 @@ fn convert_to_rgba(
         match format {
             VideoFormat::RGBA => output_row.copy_from_slice(source_row),
             VideoFormat::RGBx => {
-                for (source_pixel, output_pixel) in source_row
-                    .chunks_exact(4)
-                    .zip(output_row.chunks_exact_mut(4))
-                {
+                for (source_pixel, output_pixel) in pixel_pairs(source_row, output_row) {
                     output_pixel.copy_from_slice(&[
                         source_pixel[0],
                         source_pixel[1],
@@ -444,10 +441,7 @@ fn convert_to_rgba(
                 }
             }
             VideoFormat::BGRA => {
-                for (source_pixel, output_pixel) in source_row
-                    .chunks_exact(4)
-                    .zip(output_row.chunks_exact_mut(4))
-                {
+                for (source_pixel, output_pixel) in pixel_pairs(source_row, output_row) {
                     output_pixel.copy_from_slice(&[
                         source_pixel[2],
                         source_pixel[1],
@@ -457,10 +451,7 @@ fn convert_to_rgba(
                 }
             }
             VideoFormat::BGRx => {
-                for (source_pixel, output_pixel) in source_row
-                    .chunks_exact(4)
-                    .zip(output_row.chunks_exact_mut(4))
-                {
+                for (source_pixel, output_pixel) in pixel_pairs(source_row, output_row) {
                     output_pixel.copy_from_slice(&[
                         source_pixel[2],
                         source_pixel[1],
@@ -470,10 +461,7 @@ fn convert_to_rgba(
                 }
             }
             VideoFormat::ARGB => {
-                for (source_pixel, output_pixel) in source_row
-                    .chunks_exact(4)
-                    .zip(output_row.chunks_exact_mut(4))
-                {
+                for (source_pixel, output_pixel) in pixel_pairs(source_row, output_row) {
                     output_pixel.copy_from_slice(&[
                         source_pixel[1],
                         source_pixel[2],
@@ -483,10 +471,7 @@ fn convert_to_rgba(
                 }
             }
             VideoFormat::ABGR => {
-                for (source_pixel, output_pixel) in source_row
-                    .chunks_exact(4)
-                    .zip(output_row.chunks_exact_mut(4))
-                {
+                for (source_pixel, output_pixel) in pixel_pairs(source_row, output_row) {
                     output_pixel.copy_from_slice(&[
                         source_pixel[3],
                         source_pixel[2],
@@ -496,10 +481,7 @@ fn convert_to_rgba(
                 }
             }
             VideoFormat::xRGB => {
-                for (source_pixel, output_pixel) in source_row
-                    .chunks_exact(4)
-                    .zip(output_row.chunks_exact_mut(4))
-                {
+                for (source_pixel, output_pixel) in pixel_pairs(source_row, output_row) {
                     output_pixel.copy_from_slice(&[
                         source_pixel[1],
                         source_pixel[2],
@@ -509,10 +491,7 @@ fn convert_to_rgba(
                 }
             }
             VideoFormat::xBGR => {
-                for (source_pixel, output_pixel) in source_row
-                    .chunks_exact(4)
-                    .zip(output_row.chunks_exact_mut(4))
-                {
+                for (source_pixel, output_pixel) in pixel_pairs(source_row, output_row) {
                     output_pixel.copy_from_slice(&[
                         source_pixel[3],
                         source_pixel[2],
@@ -526,6 +505,17 @@ fn convert_to_rgba(
     }
 
     Ok(rgba)
+}
+
+fn pixel_pairs<'a>(
+    source: &'a [u8],
+    output: &'a mut [u8],
+) -> impl Iterator<Item = (&'a [u8; 4], &'a mut [u8; 4])> {
+    source
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<4>().0)
 }
 
 #[cfg(test)]

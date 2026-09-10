@@ -18,10 +18,6 @@ pub enum CaptureError {
     #[error("Erro SPA: {0}")]
     Spa(String),
 
-    #[cfg(target_os = "linux")]
-    #[error("Erro de buffer: {0}")]
-    Buffer(String),
-
     #[cfg(target_os = "macos")]
     #[error("Erro do ScreenCaptureKit: {0}")]
     ScreenCaptureKit(String),

@@ -58,7 +58,7 @@ impl PortalSession {
             None => (0, 0),
         };
 
-        let fd: OwnedFd = screencast.open_pipe_wire_remote(&session).await?.into();
+        let fd: OwnedFd = screencast.open_pipe_wire_remote(&session).await?;
 
         Ok(Self {
             _session: session,
