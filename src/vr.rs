@@ -11,10 +11,12 @@ use bevy::{
     window::{PresentMode, PrimaryWindow, WindowMode, WindowPlugin, WindowResized},
     winit::{UpdateMode, WinitSettings},
 };
-use tokio::runtime::Runtime;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use crate::capture::ScreenCapture;
+use crate::{
+    capture::ScreenCapture,
+    error::{CaptureError, Result},
+};
 
 // Comece em modo janela para a janela do VibesVR nao esconder a fonte
 // selecionada no portal. F11 continua ativando a saida SBS em tela cheia.
@@ -62,9 +64,9 @@ impl Default for LensSettings {
 }
 
 struct CaptureState {
-    // A captura deve ser destruída antes do runtime.
-    capture: ScreenCapture,
-    _runtime: Runtime,
+    capture: Option<ScreenCapture>,
+    fps: u32,
+    startup_error: Option<CaptureError>,
 }
 
 #[derive(Resource)]
@@ -93,16 +95,12 @@ enum Eye {
 #[derive(Component)]
 struct CinemaScreen;
 
-pub fn run(capture: ScreenCapture, runtime: Runtime) {
+pub fn run(capture_fps: u32) -> Result<()> {
     let mut app = App::new();
 
-    app.insert_non_send_resource(CaptureState {
-        capture,
-        _runtime: runtime,
-    })
     // Captura de vídeo não pode ser suspensa quando a janela perde foco (por
     // exemplo, enquanto Sunshine ou o seletor do portal está em primeiro plano).
-    .insert_resource(WinitSettings {
+    app.insert_resource(WinitSettings {
         focused_mode: UpdateMode::Continuous,
         unfocused_mode: UpdateMode::Continuous,
     })
@@ -111,7 +109,6 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
     .insert_resource(AmbientLight {
         color: Color::srgb(0.12, 0.14, 0.20),
         brightness: 55.0,
-        ..default()
     })
     .insert_resource(FrameStats {
         frames: 0,
@@ -131,8 +128,14 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
             ..default()
         }),
         ..default()
-    }))
-    .add_systems(Startup, setup_cinema)
+    }));
+
+    app.insert_non_send_resource(CaptureState {
+        capture: None,
+        fps: capture_fps,
+        startup_error: None,
+    })
+    .add_systems(Startup, (setup_cinema, initialize_capture))
     .add_systems(
         Update,
         (
@@ -147,6 +150,31 @@ pub fn run(capture: ScreenCapture, runtime: Runtime) {
         "VibesVR SBS iniciado: ESC sai; F11 tela cheia; Q/E zoom; Z/X FOV; C/V IPD; R/F distância; 0 restaura"
     );
     app.run();
+
+    if let Some(error) = app
+        .world_mut()
+        .non_send_resource_mut::<CaptureState>()
+        .startup_error
+        .take()
+    {
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn initialize_capture(mut capture_state: NonSendMut<CaptureState>, mut exit: EventWriter<AppExit>) {
+    // Esta Startup schedule só roda depois que o event loop do winit lançou o
+    // NSApplication e conectou o processo ao WindowServer. O ScreenCaptureKit
+    // aborta em CGS_REQUIRE_INIT quando o filtro é criado antes desse ponto.
+    match ScreenCapture::new(capture_state.fps) {
+        Ok(capture) => capture_state.capture = Some(capture),
+        Err(capture_error) => {
+            error!(error = %capture_error, "Não foi possível iniciar a captura");
+            capture_state.startup_error = Some(capture_error);
+            exit.send(AppExit::error());
+        }
+    }
 }
 
 fn setup_cinema(
@@ -315,7 +343,10 @@ fn update_desktop_texture(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut stats: ResMut<FrameStats>,
 ) {
-    let Some(frame) = capture_state.capture.try_receive_frame() else {
+    let Some(capture) = capture_state.capture.as_mut() else {
+        return;
+    };
+    let Some(frame) = capture.try_receive_frame() else {
         return;
     };
 
@@ -333,9 +364,13 @@ fn update_desktop_texture(
     };
     if frame.data().len() != expected {
         warn!(
-            received = frame.data().len(),
+            received = frame.size_bytes(),
             expected, "Frame RGBA com tamanho inválido"
         );
+        return;
+    }
+    if frame.stride() != frame.width().saturating_mul(4) {
+        warn!(stride = frame.stride(), "Frame RGBA com stride inválido");
         return;
     }
 
@@ -382,7 +417,10 @@ fn update_desktop_texture(
         info!(
             width = frame.width(),
             height = frame.height(),
-            bytes = frame.data().len(),
+            stride = frame.stride(),
+            bytes = frame.size_bytes(),
+            frame_number = frame.frame_number(),
+            timestamp_ms = frame.timestamp().as_millis(),
             signature,
             "Primeiro frame ligado ao material 3D"
         );

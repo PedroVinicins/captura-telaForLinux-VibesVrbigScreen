@@ -11,10 +11,6 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::with_metadata(width, height, data, Duration::ZERO, 0)
-    }
-
     pub fn with_metadata(
         width: u32,
         height: u32,

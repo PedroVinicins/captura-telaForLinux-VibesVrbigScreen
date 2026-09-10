@@ -52,8 +52,6 @@ pub struct PipeWireStream {
     stream: StreamRc,
     mainloop: MainLoopRc,
     receiver: Receiver<Frame>,
-    width: u32,
-    height: u32,
     stopped: bool,
 }
 
@@ -312,8 +310,6 @@ impl PipeWireStream {
             stream,
             mainloop,
             receiver,
-            width,
-            height,
             stopped: false,
         })
     }
@@ -343,11 +339,6 @@ impl PipeWireStream {
             }
         }
 
-        if let Some(frame) = latest.as_ref() {
-            self.width = frame.width();
-            self.height = frame.height();
-        }
-
         latest
     }
 
@@ -360,14 +351,6 @@ impl PipeWireStream {
             warn!(%error, "Falha ao desconectar o stream PipeWire");
         }
         self.stopped = true;
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
     }
 }
 

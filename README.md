@@ -1,49 +1,88 @@
 # VibesVR Screen Capture
 
-Aplicativo Linux em Rust que captura uma janela autorizada pelo
-`xdg-desktop-portal`, recebe seus frames pelo PipeWire e os exibe em um cinema
-3D Side-by-Side com Bevy. Sunshine/Moonlight é responsável por codificar e
-transmitir a janela final; este executável não inicia um servidor de vídeo.
+[![CI](https://github.com/PedroVinicins/captura-telaForLinux-VibesVrbigScreen/actions/workflows/ci.yml/badge.svg)](https://github.com/PedroVinicins/captura-telaForLinux-VibesVrbigScreen/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/PedroVinicins/captura-telaForLinux-VibesVrbigScreen)](https://github.com/PedroVinicins/captura-telaForLinux-VibesVrbigScreen/releases/latest)
+
+Aplicativo em Rust para Linux e macOS que captura uma janela e a exibe em um
+cinema 3D Side-by-Side com Bevy. Sunshine/Moonlight pode codificar e transmitir
+a janela final; este executável não inicia um servidor de vídeo.
 
 ## Arquitetura
 
 ```text
-main/Tokio
-  └─ xdg-desktop-portal ── autorização, sessão e descritor PipeWire
-       └─ PipeWire ── negociação e buffers RAW
-            └─ conversão para Frame RGBA
-                 └─ canal limitado (2 frames)
-                      └─ Bevy/wgpu ── textura do cinema e câmeras SBS
+                        ┌─ Linux: xdg-desktop-portal → PipeWire
+main → captura nativa ──┤
+                        └─ macOS: ScreenCaptureKit → CoreVideo
+                                      │
+                                      ▼
+                              Frame RGBA validado
+                                      │
+                              canal limitado (2)
+                                      │
+                                      ▼
+                     Bevy/wgpu → cinema 3D + câmeras SBS
 ```
 
-- `src/portal.rs`: integração segura com o portal de screencast.
-- `src/pipewire/stream.rs`: stream, negociação e conversão dos pixels.
-- `src/capture.rs`: ciclo de vida conjunto da sessão e do stream.
-- `src/frame.rs`: frame imutável com metadados.
-- `src/vr.rs`: cena 3D, textura, câmeras e controles.
+- `src/capture/linux.rs`: ciclo de vida do portal e do PipeWire no Linux.
+- `src/capture/macos.rs`: seleção e captura contínua de janela com
+  ScreenCaptureKit no macOS.
+- `src/capture.rs`: fachada comum escolhida em tempo de compilação.
+- `src/frame.rs`: frame RGBA imutável com metadados.
+- `src/vr.rs`: cena 3D, textura, câmeras e controles compartilhados.
 
-Os arquivos em `src/encoder/` e os módulos PipeWire não declarados por
-`src/pipewire/mod.rs` são protótipos e não fazem parte do binário atual.
+## Requisitos
 
-## Dependências de sistema
+### macOS
 
-É necessário ter Rust e os pacotes de desenvolvimento do PipeWire/SPA
-instalados. Os nomes variam conforme a distribuição; no Fedora normalmente são
-`pipewire-devel` e `clang-devel`.
+- macOS 12.3 ou mais recente.
+- Rust estável.
+- Xcode Command Line Tools (`xcode-select --install`).
+- Permissão de **Gravação de Tela** em **Ajustes do Sistema → Privacidade e
+  Segurança**. Em versões recentes, a opção pode aparecer como **Gravação de
+  Tela e Áudio do Sistema**.
 
-## Executar
+Na primeira execução, aceite a solicitação do macOS, encerre o programa e abra-o
+novamente. Ao usar `cargo run`, autorize também o Terminal/iTerm utilizado para
+iniciar o processo, se ele aparecer na lista de permissões.
+
+### Linux
+
+É necessário ter um ambiente Wayland ou X11 com `xdg-desktop-portal`, além dos
+pacotes de desenvolvimento do PipeWire/SPA. No Fedora, normalmente:
+
+```bash
+sudo dnf install pipewire-devel clang-devel
+```
+
+No Ubuntu/Debian, normalmente:
+
+```bash
+sudo apt install libpipewire-0.3-dev libspa-0.2-dev clang
+```
+
+## Compilar e executar
+
+O mesmo comando funciona nos dois sistemas:
 
 ```bash
 cargo run --release
 ```
 
-Use `--release` para captura real. O perfil debug torna a conversão de mais de
-dois milhões de pixels por frame muito lenta e pode aparentar travamentos.
+Use `--release` para captura real. O perfil debug torna a conversão de milhões
+de pixels por frame muito lenta.
 
-Quando o seletor do portal aparecer, escolha a janela que será exibida. A
-aplicação começa em modo janela para reduzir o risco de capturar a própria saída.
+No Linux, escolha a janela no seletor gráfico do portal. No macOS, escolha o
+número da janela na lista exibida no terminal. Para selecionar sem interação,
+defina `VIBESVR_WINDOW` com um trecho do título, nome do aplicativo ou ID:
 
-Controles:
+```bash
+VIBESVR_WINDOW="Firefox" cargo run --release
+```
+
+A aplicação começa em modo janela para reduzir o risco de capturar a própria
+saída.
+
+## Controles
 
 - `Esc`: sair.
 - `F11`: alternar entre janela e tela cheia sem bordas.
@@ -53,8 +92,8 @@ Controles:
 - `R` / `F`: aproximar/afastar a tela virtual (3 m a 12 m).
 - `0`: restaurar zoom, FOV, IPD e distância padrão.
 
-Os ajustes são aplicados simultaneamente aos dois olhos. O IPD deve ser ajustado
-com cuidado para evitar desconforto visual; comece próximo de 64 mm.
+Os ajustes são aplicados simultaneamente aos dois olhos. Ajuste o IPD com
+cuidado para evitar desconforto visual; comece próximo de 64 mm.
 
 ## Desenvolvimento
 
@@ -64,15 +103,19 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-O processamento descarta frames antigos quando a renderização está atrasada,
-priorizando baixa latência. São aceitos frames RGBA de até 128 MiB e resolução
-máxima negociada de 8192×8192.
+O histórico de mudanças está em [CHANGELOG.md](CHANGELOG.md). As versões
+publicadas podem ser encontradas na página de
+[releases](https://github.com/PedroVinicins/captura-telaForLinux-VibesVrbigScreen/releases).
+
+As dependências específicas de Linux e macOS ficam em seções condicionais do
+`Cargo.toml`: uma plataforma não precisa instalar nem compilar a pilha nativa da
+outra. O processamento aceita frames RGBA de até 128 MiB e 8192×8192, mantém no
+máximo dois frames prontos e prioriza sempre o frame mais recente.
 
 ## Limitações atuais
 
 - Apenas captura de janela está habilitada.
-- Buffers DMA-BUF que não podem ser mapeados pela CPU são descartados.
+- No Linux, buffers DMA-BUF que não podem ser mapeados pela CPU são descartados.
 - Não há rastreamento de cabeça; as duas câmeras têm posição fixa.
-- O encoder H.264 presente como protótipo não está conectado ao aplicativo.
-- A integração gráfica precisa ser testada dentro de uma sessão Wayland/X11
-  com portal e PipeWire ativos.
+- O teste visual completo exige uma sessão gráfica e a permissão de captura do
+  sistema operacional.

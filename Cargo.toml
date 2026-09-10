@@ -1,11 +1,10 @@
 [package]
 name = "captura-tela-video"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
 anyhow = "1"
-ashpd = "=0.12.3"
 bevy = { version = "=0.14.2", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
@@ -17,10 +16,27 @@ bevy = { version = "=0.14.2", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-pipewire = "=0.10.0"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = "=0.12.3"
+pipewire = "=0.10.0"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+core-media = { version = "=0.8.1", features = ["objc"] }
+core-video = { version = "=0.6.1", features = ["link", "objc"] }
+dispatch2 = "=0.3.1"
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", features = [
+    "NSArray",
+    "NSError",
+    "NSObject",
+    "NSString",
+] }
+screen-capture-kit = "=0.7.1"
 
 [profile.release]
 opt-level = 3
